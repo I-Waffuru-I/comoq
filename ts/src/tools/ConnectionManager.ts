@@ -1,24 +1,35 @@
+import { MoqTextClient } from "./MoqTextClient";
 
-export class ConnectionManager {
-   _connected : boolean;
-   _path : string | null;
 
-   constructor() {
-      this._connected = false;  
-      this._path = null;
-   }
+class ConnectionManager  {
+  client : MoqTextClient
+  constructor() {
+    this.client = new MoqTextClient()
+  }
 
-   isConnected() : boolean {
-      return this._connected 
-   }
-   
-   async tryConnect(path : string) : Promise<boolean> {
-      this._path = path;
-      this._connected = true;
-      return true
-   }
+  async startPublish(url : string, ns: string, track : string) {
+    this.client.startPublish(url, ns, track)
+  }
+  async startSubscribe(url : string, ns: string, track : string) {
+    this.client.startSubscribe(url, ns, track)
+  }
+  
+  send(text: string) {
+    this.client.publish(text);
+  }
 
-};
+  onMessage(callback: (text: string) => void) {
+    this.client.textReceiveCallback = callback;
+  }
+
+  disconnect() {
+    this.client.disconnect();
+  }
+
+  isConnected() : boolean {
+    return this.client.isConnected()
+  }
+}
 
 export const connectionManager = new ConnectionManager();
 

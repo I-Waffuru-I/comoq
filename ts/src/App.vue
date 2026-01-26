@@ -1,25 +1,13 @@
 <script setup lang="ts">
+import ConnectionButton from "./elements/ConnectionButtons.vue"
+
 
 </script>
 
 <template>
-   <h2>IndiP : MoQ code thingy</h2>
-   <nav>
-      <RouterLink to="/">Home</RouterLink>
-      <RouterLink to="/app">Get started</RouterLink>
-   </nav>
-   <RouterView />
+  <h1>Comoq</h1>
+  <ConnectionButton />
+  <router-view></router-view>
 </template>
 
-<style scoped>
-nav {
-   margin-bottom:10px;
-}
-nav > * {
-   margin-left: 10px;
-}
-nav > * + * {
-   padding-left: 10px;
-}
-
-</style>
+<style scoped></style>

@@ -34,24 +34,3 @@ coverage
 
 # Vitest
 __screenshots__/
-
-ts/.vite
-
-# Build 
-Cargo.lock
-target
-pkg
-dist
-out
-result
-*.tsbuildinfo
-/.direnv
-
-# Secrets
-*.mp4
-*.fmp4
-*.crt
-*.key
-*.hex
-*.jwk
-*.jwt
