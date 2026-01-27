@@ -47,7 +47,7 @@ export class MoqTextClient {
     this.connection = null
   }
 
-  isConnected() {
+  isConnected() : boolean {
     return this.connection !== null;
   }
 

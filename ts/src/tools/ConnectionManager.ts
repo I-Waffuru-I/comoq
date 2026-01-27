@@ -13,7 +13,7 @@ class ConnectionManager  {
   async startSubscribe(url : string, ns: string, track : string) {
     this.client.startSubscribe(url, ns, track)
   }
-  
+
   send(text: string) {
     this.client.publish(text);
   }

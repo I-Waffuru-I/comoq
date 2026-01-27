@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { connectionManager } from '../tools/ConnectionManager';
+import { useRouter } from 'vue-router';
 import ConnectionButtons from '@/elements/ConnectionButtons.vue';
 
 const text = ref('');
@@ -8,7 +9,7 @@ const received = ref(false);
 
 onMounted(() => {
   connectionManager.onMessage((t) => {
-    text.value = text;
+    text.value = t;
     received.value = true;
   });
 });
@@ -16,10 +17,11 @@ onMounted(() => {
 function onInput() {
   if(received.value) {
     received.value = false;
+    console.log("ignore other",text.value)
     return;
   }
 
-  console.log(text.value)
+  console.log("self",text.value)
   connectionManager.send(text.value);
 }
 </script>
