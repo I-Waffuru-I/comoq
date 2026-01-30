@@ -18,6 +18,7 @@ async function subscribe() {
   await connectionManager.startSubscribe(url.value, namespace.value, track.value);
   router.push({ name: 'read' });
 }
+
 </script>
 <template>
   <h2>Connect</h2>

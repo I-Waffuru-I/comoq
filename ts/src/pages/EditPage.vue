@@ -1,28 +1,23 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { connectionManager } from '../tools/ConnectionManager';
 import { useRouter } from 'vue-router';
+import { connectionManager } from '../tools/ConnectionManager';
 import ConnectionButtons from '@/elements/ConnectionButtons.vue';
 
+const track = ref('text')
 const text = ref('');
 const received = ref(false);
 
 onMounted(() => {
-  connectionManager.onMessage((t) => {
-    text.value = t;
+  connectionManager.onMessage((track, val) => {
+    text.value = val;
     received.value = true;
   });
 });
 
 function onInput() {
-  if(received.value) {
-    received.value = false;
-    console.log("ignore other",text.value)
-    return;
-  }
-
   console.log("self",text.value)
-  connectionManager.send(text.value);
+  connectionManager.send(track.value, text.value);
 }
 </script>
 <template>

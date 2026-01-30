@@ -11,7 +11,6 @@ function disconnect() {
 </script>
 <template>
   <div class="connection-buttons">
-    <router-link :to="{ name: 'home'}">Home</router-link>
     <button @click="disconnect">Disconnect</button>
   </div>
 </template>

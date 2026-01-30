@@ -14,8 +14,8 @@ class ConnectionManager  {
     this.client.startSubscribe(url, ns, track)
   }
 
-  send(text: string) {
-    this.client.publish(text);
+  send(track:string, text:string) {
+    this.client.publish(track, text);
   }
 
   onMessage(callback: (text: string) => void) {
