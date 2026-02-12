@@ -1,44 +1,49 @@
-use moq_lite::{Broadcast, BroadcastProducer, OriginProducer, TrackProducer};
+use moq_lite::{Broadcast, BroadcastProducer, OriginConsumer, OriginProducer, Produce, TrackProducer};
+use moq_native::{ClientConfig, ServerConfig};
+use url::Url;
+use clap::Parser;
 use quinn::crypto::rustls::QuicServerConfig;
 use tokio::{task::JoinSet, sync::RwLock};
 
 use std::sync::Arc;
 
-#[derive(Clone)]
-struct ConnectedClient{
-    pub track : TrackProducer,
-    pub name : String
-}
-struct ShareFile {
-    sync : TrackProducer,
-    broadcast : BroadcastProducer,
-    clients : Vec<ConnectedClient>,
-}
-impl ShareFile {
-    pub fn add_client(&mut self, client : ConnectedClient){
-        self.clients.push(client);
-    }
+use crate::{connected::ConnectedClient, share::ShareFile};
+
+mod connected;
+mod share;
+
+
+#[derive(Parser)]
+struct AppConfig {
+    #[arg(long)]
+    pub url : Url,
 }
 
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!("START");
     moq_native::Log::new(tracing::Level::DEBUG).init();
 
-    let _relay_ip = "localhost:4443";
-
+    let config = AppConfig::parse();
     let mut origin = moq_lite::Origin::produce();
+    let set = init_shared_files(&mut origin);
+    
+    // Not sure which to use. client gives runtime errors for the Quic connection
+    // let client = moq_native::Client::new(ClientConfig::default())?;
+    // let session = client.with_publish(origin.producer.consume()).connect(config.url).await?;
 
-    let set = init_shared_files(&mut origin.producer);
+    let server_config = ServerConfig::default();
+    let server = moq_native::Server::new(server_config)?;
+    let session = server.with_publish(origin.producer.consume());
+
     let _ = set.join_all().await;
 
     Ok(())
 }
 
 /// spawn a tokio task for each shared file
-fn init_shared_files(origin : &mut OriginProducer)-> JoinSet<()> {
-    let broadcast_names = vec!("text");
+fn init_shared_files(origin : &mut Produce<OriginProducer, OriginConsumer>)-> JoinSet<()> {
+    let broadcast_names = vec!("comoq");
     let mut set : JoinSet<()> = JoinSet::new(); 
     for name in broadcast_names {
         let mut bc = Broadcast::produce();
@@ -51,10 +56,9 @@ fn init_shared_files(origin : &mut OriginProducer)-> JoinSet<()> {
             broadcast : bc.producer,
             clients : vec!(),
         };
-        origin.publish_broadcast(name, bc.consumer);
+        origin.producer.publish_broadcast(name, bc.consumer);
         println!("INIT: started broadcast [{name}]");
         set.spawn(async move {
-            println!("INIT: started broadcast management");
             manage_sf(sf).await;
         });
     }
@@ -77,8 +81,8 @@ async fn manage_sf(sf : ShareFile){
         println!("NEW_CONN: listen incoming");
         while let Some(track) = broadcast.requested_track().await {
             let name = track.info.name.to_string();
-            println!("NEW_CONN: new connection [{}]", name);
-            let client = ConnectedClient { track, name, };
+            println!("NEW_CONN: requested track [{}]", name);
+            let client = ConnectedClient { track, name };
             let mut write_conn = asf_conn.write().await;
             write_conn.add_client(client);
         }
@@ -112,6 +116,7 @@ async fn manage_sf(sf : ShareFile){
 }
 
 async fn sync_file(client_track : TrackProducer, mut master_track : TrackProducer) {
+    println!("start sync file");
     if let Ok(Some(mut group)) = client_track.consume().next_group().await {
         if let Ok(Some(frame )) = group.read_frame().await{
             println!("got bytes in track [{}]: ", client_track.info.name);
