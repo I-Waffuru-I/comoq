@@ -1,0 +1,26 @@
+[package]
+name = "serv"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "serv"
+path = "src/main.rs"
+
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
+
+[[bin]]
+name = "test_api"
+path = "src/test_api.rs"
+
+[dependencies]
+anyhow = "1.0.101"
+moq-lite = "0.12.0"
+moq-native = "0.12.0"
+bytes = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+url = "2.5.8"
+clap = "4.5.58"
