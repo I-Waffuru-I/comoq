@@ -56,11 +56,8 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(Duration::from_secs(3)).await;
             let text = text_clone.read().await.clone();
             let mut main = main_track_clone.write().await;
-            let mut new_group = main.append_group();
             println!("ECHO: [{}]", text);
-            let b = bytes::Bytes::from(text);
-            dbg!(&b);
-            new_group.write_frame(b);
+            main.write_frame(bytes::Bytes::from(text));
         }
     });
 
