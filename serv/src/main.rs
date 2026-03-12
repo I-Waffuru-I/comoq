@@ -1,4 +1,4 @@
-use moq_lite::{Broadcast, Origin};
+use moq_lite::{Broadcast, Origin, Track};
 use moq_native::ServerConfig;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
@@ -10,10 +10,13 @@ async fn main() -> anyhow::Result<()> {
     let mut config = ServerConfig::default();
     config.bind = Some("127.0.0.1:4443".parse()?);
     config.tls.generate = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-    let origin = Origin::produce();
-    //let producer = origin.producer.consume();
+    // publish to clients (echo)
+    let publish_origin = Origin::produce();
+    // consume from clients
+    let mut consume_origin = Origin::produce();
     let mut server = moq_native::Server::new(config)?
-        .with_publish(origin.consumer.clone());
+        .with_publish(publish_origin.consumer.clone())
+        .with_consume(consume_origin.producer.clone());
 
     let mut bc = Broadcast::produce();
     // main track to push
@@ -24,9 +27,10 @@ async fn main() -> anyhow::Result<()> {
     let pushed_string = Arc::new(RwLock::new(String::from("moq echo text")));
 
     let main_track = Arc::new(RwLock::new(main_t));
-    let mut bc_producer = bc.producer.clone();
 
-    origin.producer.publish_broadcast("echo", bc.consumer);
+    publish_origin
+        .producer
+        .publish_broadcast("echo", bc.consumer);
 
     println!("Server started, listening for tracks in broadcast 'echo'...");
 
@@ -48,46 +52,48 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // sends the full string once per second
+    // sends the full string once per few seconds
     let text_clone = pushed_string.clone();
     let main_track_clone = main_track.clone();
     let send_thread = tokio::spawn(async move {
         loop {
             let text = text_clone.read().await.clone();
             let mut main = main_track_clone.write().await;
-            println!("ECHO: [{}]", text);
             main.write_frame(bytes::Bytes::from(text));
-
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
     });
 
+    let push_str_clone = pushed_string.clone();
     let receive_thread = tokio::spawn(async move {
-
         println!("START LISTEN FOR UPDATE TRACKS");
-        while let Some(client_track) = bc_producer.requested_track().await {
-            let name = client_track.info.name.clone();
-            println!("Handle new track: [{}]", name);
-            if name == "main" {
-                continue;
-            }
-            let text_clone = pushed_string.clone();
-            tokio::spawn(async move {
-                let mut consumer = client_track.consume();
-                while let Ok(Some(mut group)) = consumer.next_group().await {
+        while let Some(announced) = consume_origin.consumer.announced().await {
+            println!("\nANNOUNCED [{}]\n", announced.0);
+            let bc = announced.1.expect("no broadcast in announced..?");
+
+            let push_str_inner_clone = push_str_clone.clone();
+            let handle_bc = tokio::spawn(async move {
+                let track_name = String::from("client_1");
+                let track = Track {
+                    name: track_name.clone(),
+                    priority: 0,
+                };
+                let mut client_track = bc.subscribe_track(&track);
+                println!("\tstart handle bc [{}]", announced.0.clone());
+                while let Ok(Some(mut group)) = client_track.next_group().await {
                     while let Ok(Some(frame)) = group.read_frame().await {
-                        let frame: bytes::Bytes = frame;
                         if let Ok(text) = String::from_utf8(frame.to_vec()) {
-                            println!("UPDATE: [{}]: [{}]", name, text);
-                            let mut push_text = text_clone.write().await;
-                            *push_text = text;
+                            println!("Update: [{}]", text);
+                            let mut ps = push_str_inner_clone.write().await;
+                            *ps = text;
                         }
                     }
                 }
-                println!("Client update track closed: {}", name);
+                println!("\tdone handle bc [{}]", announced.0.clone());
             });
+            let _ = handle_bc.await;
         }
     });
-    let _ = tokio::join!(accepting_thread,send_thread,receive_thread);
+    let _ = tokio::join!(accepting_thread, send_thread, receive_thread);
     Ok(())
 }
