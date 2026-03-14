@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
     let mut config = ClientConfig::default();
     config.tls.disable_verify = Some(true);
 
-    let bc_name = String::from("client");
+    let bc_name = String::from("file1");
     let track_name = String::from("client_1");
 
     let read_origin = moq_lite::Origin::produce();
