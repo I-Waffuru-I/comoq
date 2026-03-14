@@ -1,25 +1,47 @@
+use clap::Parser;
 use moq_lite::{Broadcast, Origin, OriginConsumer, OriginProducer, Track};
 use moq_native::ServerConfig;
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::RwLock, task::JoinSet};
+use axum::{Router, routing::get};
+use tower_http::cors::{Any, CorsLayer};
 
+
+#[derive(clap::Parser)]
+struct ArgList {
+    #[arg(short, long)]
+    pub url : String,
+    #[arg(short, long)]
+    pub cert_path : String,
+    #[arg(short, long)]
+    pub key_path : String,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    //moq_native::Log::new(tracing::Level::DEBUG).init();
+    moq_native::Log::new(tracing::Level::DEBUG).init();
+
+    let arglist = ArgList::parse();
 
     let mut config = ServerConfig::default();
-    let files = vec!("file1", "file2");
+    let files = vec!("file1");
 
-    config.bind = Some("127.0.0.1:4443".parse()?);
-    config.tls.generate = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-    // publish to clients (echo)
+    config.bind = Some(arglist.url.parse()?);
+    config.tls.cert.push(PathBuf::from(arglist.cert_path));
+    config.tls.key.push(PathBuf::from(arglist.key_path));
+
+    // publish to clients 
     let publish_origin = Origin::produce();
     // consume from clients
     let consume_origin = Origin::produce();
     let mut server = moq_native::Server::new(config)?
         .with_publish(publish_origin.consumer.clone())
         .with_consume(consume_origin.producer.clone());
+
+    let fingerprints = server.tls_info().read().unwrap().fingerprints.clone();
+    println!("FINGERPRINTS");
+    dbg!(&fingerprints);
+    let _ = setup_cors_stuff(fingerprints.get(0).unwrap().clone()).await;
 
 
     println!("Server started, listening for tracks in broadcast 'echo'...");
@@ -76,7 +98,7 @@ async fn run_file(file_name: &str, publish_origin : OriginProducer, mut consume_
         loop {
             let text = text_clone.read().await.clone();
             let mut track = sync_track_clone.write().await;
-            println!("sync bc [{name_clone}] : [{text}]");
+            //println!("sync bc [{name_clone}] : [{text}]");
             track.write_frame(bytes::Bytes::from(text));
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
@@ -125,4 +147,22 @@ async fn run_file(file_name: &str, publish_origin : OriginProducer, mut consume_
         }
     });
     let _ = tokio::join!(send_thread, receive_thread);
+}
+
+async fn setup_cors_stuff(fingerprint : String) -> anyhow::Result<()>{
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let app = Router::new()
+        .route("/certificate.sha256", get(fingerprint))
+        .layer(cors);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:4443").await?;
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    Ok(())
 }
