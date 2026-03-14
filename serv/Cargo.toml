@@ -11,10 +11,6 @@ path = "src/main.rs"
 name = "client"
 path = "src/bin/client.rs"
 
-[[bin]]
-name = "test_api"
-path = "src/test_api.rs"
-
 [dependencies]
 anyhow = "1.0.101"
 moq-lite = "0.12.0"
