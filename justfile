@@ -16,7 +16,7 @@ serve relay_url="http://0.0.0.0:4443":
    cd rs && cargo run -- --url {{relay_url}}
 
 site:
-   cd ts && npm run dev
+   cd site && npm run dev
 
 
 
