@@ -1,8 +1,8 @@
 use clap::Parser;
 use moq_lite::{Broadcast, Origin, OriginConsumer, OriginProducer, Track};
 use moq_native::ServerConfig;
-use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::{sync::RwLock, task::JoinSet};
+use std::{path::PathBuf, pin::pin, sync::Arc, time::Duration};
+use tokio::{io::join, sync::RwLock, task::JoinSet};
 use axum::{Router, routing::get};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -23,6 +23,7 @@ async fn main() -> anyhow::Result<()> {
 
     let arglist = ArgList::parse();
 
+
     let mut config = ServerConfig::default();
     let files = vec!("file1");
 
@@ -41,12 +42,10 @@ async fn main() -> anyhow::Result<()> {
     let fingerprints = server.tls_info().read().unwrap().fingerprints.clone();
     println!("FINGERPRINTS");
     dbg!(&fingerprints);
-    let _ = setup_cors_stuff(fingerprints.get(0).unwrap().clone()).await;
-
+    let mut joinset : JoinSet<()> = JoinSet::new();
+    let _ = setup_cors_stuff(fingerprints.get(0).unwrap().clone(), &mut joinset).await;
 
     println!("Server started, listening for tracks in broadcast 'echo'...");
-
-    let mut joinset : JoinSet<()> = JoinSet::new();
 
     // task to accept incoming connections
     joinset.spawn(async move {
@@ -73,8 +72,9 @@ async fn main() -> anyhow::Result<()> {
             run_file(file, pub_clone.producer, con_clone.consumer)
         );
     }
-    joinset.join_all().await;
 
+    joinset.join_all().await;
+    
     Ok(())
 }
 
@@ -149,8 +149,9 @@ async fn run_file(file_name: &str, publish_origin : OriginProducer, mut consume_
     let _ = tokio::join!(send_thread, receive_thread);
 }
 
-async fn setup_cors_stuff(fingerprint : String) -> anyhow::Result<()>{
+async fn setup_cors_stuff(fingerprint : String, join_set : &mut JoinSet<()>) -> anyhow::Result<()>{
 
+    // simpele http server om ne get van sha fingerprints te voorzien
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -161,8 +162,10 @@ async fn setup_cors_stuff(fingerprint : String) -> anyhow::Result<()>{
         .layer(cors);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:4443").await?;
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    join_set.spawn(
+        async move {
+            axum::serve(listener, app).await.unwrap();
+        }
+    );
     Ok(())
 }
