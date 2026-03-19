@@ -1,119 +1,150 @@
 import * as Moq from "@kixelated/moq"
-import { ShareFile } from "./ShareFile";
-
-enum ClientType {
-  Publisher,
-  Subscriber,
-}
 
 export class MoqTextClient {
-  private connection : Moq.Connection.Established | null = null;
-  private broadcast : Moq.Broadcast | null = null;
-  private namespace : string | null = null;
-  private files : Map<string,ShareFile> = new Map();
-  private clientType : ClientType | null = null;
+  private connection: Moq.Connection.Established | null = null;
+  private clientName: string;
+  private bc_name : string | null = null;
+  private rcv_callback : ((t:string)=>void) | null = null;
 
-  private _textReceiveCallback: ((track:string, text:string) => void) | null = null;
+  private update_track : Moq.Track | null = null;
+  private handledPaths : Set<string> = new Set();
+  private connecting : boolean = false;
 
-  set textReceiveCallback(callback: (track:string, text:string) => void) {
-    this._textReceiveCallback = callback;
+  constructor(clientName: string = "client_" + Math.floor(Math.random() * 1000)) {
+    this.clientName = clientName;
   }
 
-  async startPublish(url : string, ns: string, track : string){
-    if (!await this.connect(url, ns))
-      return
-    this.clientType = ClientType.Publisher;
-    this._startPub(track)
-  }
-  async startSubscribe(url : string, ns: string, track : string){
-    if (!await this.connect(url, ns))
-      return
-    this.clientType = ClientType.Subscriber;
-    this._startSub(track)
+  set_callback(callback : ((t : string)=>void)){
+    this.rcv_callback = callback;
   }
 
-  publish(trackName:string, text:string) {
-    const sf = this.files.get(trackName);
-    if (sf) {
-      console.log("published on ["+trackName+"] : ["+text+"]")
-      sf.track.writeString(text);
-    }
-  }
-
-  disconnect() {
-    if (this.clientType == ClientType.Publisher){
-      this.connection?.close();
-    }
-    this.broadcast?.close();
-    this.files.clear();
-  }
-
-  isConnected() : boolean {
-    return this.connection !== null;
-  }
-
-  private async connect(url : string, ns: string) {
+  async run(url: string) {
+    if (this.connecting) return;
+    this.connecting = true;
+    this.disconnect();
     try {
       this.connection = await Moq.Connection.connect(new URL(url));
-      this.namespace = ns;
-      return true
-    }catch(e){
-      console.error(e)
-      return false
+      console.log("Connected to", url);
+      this.handleAnnounced()
+    } catch (e) {
+      console.error("Connection failed", e);
+    } finally {
+      this.connecting = false;
     }
   }
 
-  private async _startPub(trackname : string){
-    if (!this.connection || !this.namespace)
-      return
+  public async update(text : string) {
+    if (this.update_track) {
+      console.log(`update: [${text}]`)
+      this.update_track.writeString(text)
+    }
+  }
 
-    this.broadcast = new Moq.Broadcast();
-    this.connection.publish(Moq.Path.from(this.namespace), this.broadcast);
+  private async handleAnnounced() {
+    if (!this.connection) return;
 
     for (;;) {
-      const request = await this.broadcast.requested();
+      const entry = await this.connection.announced().next();
+      if (!entry) break;
+
+      const path_str = entry.path.toString();
+
+      if (!entry.active) {
+        console.log("Broadcast unannounced:", path_str);
+        this.handledPaths.delete(path_str);
+        continue;
+      }
+
+      if (this.handledPaths.has(path_str)) {
+        continue;
+      }
+
+      if (path_str.includes("/client/")) {
+        continue;
+      }
+
+      // found file broadcast
+      console.log("HANDLE BC: ", path_str);
+      this.bc_name = path_str
+      this.handledPaths.add(path_str);
+
+      // handle incoming updates
+      this.handleSyncBc(entry.path);
+      // start own bc
+      this.handleOwnBroadcast(path_str)
+    }
+  }
+
+  private async handleSyncBc(path: Moq.Path.Valid) {
+    if (!this.connection) return;
+
+    const pathStr = path.toString();
+    const bc = this.connection.consume(path);
+    const track = bc.subscribe("sync", 0);
+    console.log(`Subscribed to track "update" on broadcast: [${pathStr}]`);
+
+    // Read incoming messages
+    this.readTrack(track, pathStr);
+  }
+  private async readTrack(track: Moq.Track, pathStr: string) {
+    for (;;) {
+      const text = await track.readString();
+      if (text === undefined) {
+        console.log(`Track "update" closed for [${pathStr}]`);
+        break;
+      }
+      console.log(`GOT : [${pathStr}/sync]: ${text}`);
+      if (this.rcv_callback) {
+        this.rcv_callback(text)
+      }
+    }
+  }
+
+  private async handleOwnBroadcast(pathStr : string) {
+    if (!this.connection){
+      return
+    }
+    // Start its own broadcast `file_name/client/client_name`
+    const ownBcPathStr = `${pathStr}/client/${this.clientName}`;
+    const ownBcPath = Moq.Path.from(ownBcPathStr);
+
+    const bc = new Moq.Broadcast();
+    this.connection.publish(ownBcPath, bc);
+    console.log(`Published own broadcast: [${ownBcPathStr}]`);
+
+    for (;;) {
+      const request = await bc.requested();
       if (!request) break;
 
-      if (request.track.name === trackname) {
-        this.files.set(trackname, new ShareFile(trackname, request.track))
-        console.log("inserted request track")
+      if (request.track.name === "update") {
+        console.log(`Received request for "update" track on my broadcast`);
+        this.update_track = request.track;
       } else {
         request.track.close(new Error("not found"));
       }
     }
   }
 
-  private async _startSub(trackname : string){
-    if (!this.connection || !this.namespace)
-      return
-    const broadcast = this.connection.consume(Moq.Path.from(this.namespace));
-    const track = broadcast.subscribe(trackname, 0);
-    this.files.set(trackname, new ShareFile(trackname, track))
-    console.log("sub connection done on track"+trackname);
-
-  }
-
-  private async _keepAliveSub(){
-    for (;;) {
-      this.files.forEach(async (val,key,m)=>{
-        const group = await val.syncTrack.nextGroup();
-        if (!group) {
-          console.log("No next group");
-          return;
-        }
-
-        for (;;) {
-          const frame = await group.readString();
-          if (frame === undefined) { // currently group.readString() returns string | undefined.
-            break; // End of group
-          }
-          if (this._textReceiveCallback) {
-              console.log("frame",frame)
-              this._textReceiveCallback(val.trackName, frame);
-          }
-        }
-      })
+  private async publishUpdates(track: Moq.Track) {
+    let counter = 0;
+    for (; ;) {
+      const msg = `update from client ${this.clientName} #${counter}`;
+      console.log(`PUBLISH to my own track: ${msg}`);
+      track.writeString(msg);
+      counter++;
+      await new Promise(resolve => setTimeout(resolve, 5000));
     }
   }
 
+  disconnect() {
+    this.connection?.close();
+    this.connection = null
+    this.update_track = null
+    this.bc_name = null
+    this.handledPaths.clear();
+  }
+
+  isConnected(): boolean {
+    return this.connection !== null;
+  }
 }
