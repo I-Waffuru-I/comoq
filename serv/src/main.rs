@@ -1,8 +1,8 @@
 use clap::Parser;
 use moq_lite::{Broadcast, Origin, OriginConsumer, OriginProducer, Track};
 use moq_native::ServerConfig;
-use std::{path::PathBuf, pin::pin, sync::Arc, time::Duration};
-use tokio::{io::join, sync::RwLock, task::JoinSet};
+use std::{path::PathBuf, sync::Arc, time::Duration};
+use tokio::{sync::RwLock, task::JoinSet};
 use axum::{Router, routing::get};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -19,7 +19,7 @@ struct ArgList {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    moq_native::Log::new(tracing::Level::DEBUG).init();
+    moq_native::Log::new(tracing::Level::INFO).init();
 
     let arglist = ArgList::parse();
 
@@ -93,7 +93,7 @@ async fn run_file(file_name: &str, publish_origin : OriginProducer, mut consume_
     // sends the full string once per few seconds
     let text_clone = pushed_string.clone();
     let sync_track_clone = sync_track.clone();
-    let name_clone = file_name.to_string();
+    let _name_clone = file_name.to_string();
     let send_thread = tokio::spawn(async move {
         loop {
             let text = text_clone.read().await.clone();
@@ -110,7 +110,7 @@ async fn run_file(file_name: &str, publish_origin : OriginProducer, mut consume_
     let receive_thread = tokio::spawn(async move {
         println!("START LISTEN FOR UPDATE BCs IN {name_clone}");
         while let Some(announced) = consume_origin.announced().await {
-            println!("\nANNOUNCED [{}]\n", announced.0);
+            println!("\nUPDATE BC ANNOUNCED [{}]\n", announced.0);
             // ignore bc that aren't directed at this file
             // maybe it messes with other threads?
             if !announced.0.to_string().starts_with(&format!("{name_clone}/client/")) {
@@ -126,6 +126,7 @@ async fn run_file(file_name: &str, publish_origin : OriginProducer, mut consume_
             // find update track of client to read changes from
             let push_str_inner_clone = push_str_clone.clone();
             let handle_bc = tokio::spawn(async move {
+                println!("start thread for updates track");
                 let track_name = String::from("update");
                 let track = Track {
                     name: track_name.clone(),
@@ -143,7 +144,7 @@ async fn run_file(file_name: &str, publish_origin : OriginProducer, mut consume_
                 }
                 println!("\tdone handle bc [{}]", announced.0.clone());
             });
-            let _ = handle_bc.await;
+            // let _ = handle_bc.await;
         }
     });
     let _ = tokio::join!(send_thread, receive_thread);
