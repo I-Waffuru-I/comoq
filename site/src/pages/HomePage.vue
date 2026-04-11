@@ -26,8 +26,8 @@ async function write() {
   </div>
 
   <div style="margin-top: 10px;">
-    <button @click="connect">Read</button>
-    <button @click="connect">Edit</button>
+    <button @click="read">Read</button>
+    <button @click="write">Edit</button>
   </div>
 </template>
 <style>

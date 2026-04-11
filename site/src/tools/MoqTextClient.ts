@@ -9,6 +9,7 @@ export class MoqTextClient {
   private update_track : Moq.Track | null = null;
   private handledPaths : Set<string> = new Set();
   private connecting : boolean = false;
+  private lastKnownText : string = "";
 
   constructor(clientName: string = "client_" + Math.floor(Math.random() * 1000)) {
     this.clientName = clientName;
@@ -35,44 +36,101 @@ export class MoqTextClient {
 
   public async update(text : string) {
     if (this.update_track) {
-      console.log(`update: [${text}]`)
-      this.update_track.writeString(text)
+      const ot = this.computeOT(this.lastKnownText, text);
+      const jsonOt = JSON.stringify(ot);
+      console.log(`Sending OT: ${jsonOt}`);
+      this.update_track.writeString(jsonOt);
+      this.lastKnownText = text;
     }
+  }
+
+  private computeOT(oldText: string, newText: string): (string | number)[] {
+    let prefixLen = 0;
+    while (prefixLen < oldText.length && prefixLen < newText.length && oldText[prefixLen] === newText[prefixLen]) {
+      prefixLen++;
+    }
+
+    let suffixLen = 0;
+    while (
+      suffixLen < oldText.length - prefixLen &&
+      suffixLen < newText.length - prefixLen &&
+      oldText[oldText.length - 1 - suffixLen] === newText[newText.length - 1 - suffixLen]
+    ) {
+      suffixLen++;
+    }
+
+    const ops: (string | number)[] = [];
+    if (prefixLen > 0) {
+      ops.push(prefixLen);
+    }
+
+    const deleteLen = oldText.length - prefixLen - suffixLen;
+    const insertText = newText.substring(prefixLen, newText.length - suffixLen);
+
+    if (insertText.length > 0) {
+      ops.push(insertText);
+    }
+    if (deleteLen > 0) {
+      ops.push(-deleteLen);
+    }
+
+    if (suffixLen > 0) {
+      ops.push(suffixLen);
+    }
+
+    return ops;
   }
 
   private async handleAnnounced() {
     if (!this.connection) return;
 
-    for (;;) {
-      const entry = await this.connection.announced().next();
-      if (!entry) break;
+    const entry = await this.connection.announced().next();
 
-      const path_str = entry.path.toString();
-
-      if (!entry.active) {
-        console.log("Broadcast unannounced:", path_str);
-        this.handledPaths.delete(path_str);
-        continue;
-      }
-
-      if (this.handledPaths.has(path_str)) {
-        continue;
-      }
-
-      if (path_str.includes("/client/")) {
-        continue;
-      }
-
-      // found file broadcast
-      console.log("HANDLE BC: ", path_str);
-      this.bc_name = path_str
-      this.handledPaths.add(path_str);
-
-      // handle incoming updates
-      this.handleSyncBc(entry.path);
-      // start own bc
-      this.handleOwnBroadcast(path_str)
+    if (!entry || !entry.path.includes("file1")) {
+      return
     }
+
+    const path_str = entry.path.toString();
+    // found file broadcast
+    console.log("HANDLE BC: ", path_str);
+    this.bc_name = path_str
+    this.handledPaths.add(path_str);
+
+    // handle incoming updates
+    this.handleSyncBc(entry.path);
+    // start own bc
+    this.handleOwnBroadcast(path_str)
+
+    // for (;;) {
+    //   const entry = await this.connection.announced().next();
+    //   if (!entry) break;
+    //
+    //   const path_str = entry.path.toString();
+    //
+    //   if (!entry.active) {
+    //     console.log("Broadcast unannounced:", path_str);
+    //     this.handledPaths.delete(path_str);
+    //     continue;
+    //   }
+    //
+    //   if (this.handledPaths.has(path_str)) {
+    //     continue;
+    //   }
+    //
+    //   if (path_str.includes("/client/")) {
+    //     continue;
+    //   }
+    //
+    //   // found file broadcast
+    //   console.log("HANDLE BC: ", path_str);
+    //   this.bc_name = path_str
+    //   this.handledPaths.add(path_str);
+    //
+    //   // handle incoming updates
+    //   this.handleSyncBc(entry.path);
+    //   // start own bc
+    //   this.handleOwnBroadcast(path_str)
+    // }
   }
 
   private async handleSyncBc(path: Moq.Path.Valid) {
@@ -94,6 +152,7 @@ export class MoqTextClient {
         break;
       }
       console.log(`GOT : [${pathStr}/sync]: ${text}`);
+      this.lastKnownText = text;
       if (this.rcv_callback) {
         this.rcv_callback(text)
       }
@@ -122,17 +181,6 @@ export class MoqTextClient {
       } else {
         request.track.close(new Error("not found"));
       }
-    }
-  }
-
-  private async publishUpdates(track: Moq.Track) {
-    let counter = 0;
-    for (; ;) {
-      const msg = `update from client ${this.clientName} #${counter}`;
-      console.log(`PUBLISH to my own track: ${msg}`);
-      track.writeString(msg);
-      counter++;
-      await new Promise(resolve => setTimeout(resolve, 5000));
     }
   }
 

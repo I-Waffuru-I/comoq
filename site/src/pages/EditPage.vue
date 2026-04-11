@@ -3,17 +3,23 @@ import ConnectionButtons from '../elements/ConnectionButtons.vue';
 import { ref, onMounted } from 'vue';
 import { connectionManager } from '../tools/ConnectionManager';
 
-const receivedText = ref('Waiting for messages...');
-const counter = ref(0)
+const localText = ref('Waiting for messages...')
 
 onMounted(() => {
   connectionManager.set_callback((text: string) => {
-    receivedText.value = text;
+    localText.value = text;
   });
 });
+let debounceTimer: number | null = null;
 function update() {
-  counter.value += 1;
-  connectionManager.update(`${receivedText.value}${counter.value}`)
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+  }
+  debounceTimer = window.setTimeout(() => {
+    console.log(`update val ${localText.value}`)
+    connectionManager.update(localText.value)
+    debounceTimer = null;
+  }, 300);
 }
 
 </script>
@@ -21,7 +27,7 @@ function update() {
 <template>
   <h2>Edit Mode</h2>
   <div class="edit-container">
-    <textarea />
+    <textarea @input="update" v-model="localText" />
 
   </div>
   <ConnectionButtons />

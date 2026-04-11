@@ -4,17 +4,12 @@ import ConnectionButtons from '../elements/ConnectionButtons.vue';
 import { connectionManager } from '../tools/ConnectionManager';
 
 const receivedText = ref('Waiting for messages...');
-const counter = ref(0)
 
 onMounted(() => {
   connectionManager.set_callback((text: string) => {
     receivedText.value = text;
   });
 });
-function update() {
-  counter.value += 1;
-  connectionManager.update(`${receivedText.value}${counter.value}`)
-}
 </script>
 
 <template>
@@ -22,7 +17,6 @@ function update() {
   <div class="read-container">
     {{ receivedText }}
   </div>
-  <button @click="update">update</button>
   <ConnectionButtons />
 </template>
 
