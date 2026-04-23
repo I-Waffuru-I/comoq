@@ -151,12 +151,46 @@ export class MoqTextClient {
         console.log(`Track "update" closed for [${pathStr}]`);
         break;
       }
-      console.log(`GOT : [${pathStr}/sync]: ${text}`);
-      this.lastKnownText = text;
+
+      try {
+        const ops = JSON.parse(text);
+        if (Array.isArray(ops)) {
+          console.log(`GOT OT [${pathStr}/sync]: ${text}`);
+          this.lastKnownText = this.applyOT(this.lastKnownText, ops);
+        } else {
+          console.log(`GOT full text [${pathStr}/sync]: ${text}`);
+          this.lastKnownText = text;
+        }
+      } catch {
+        // Fallback for non-JSON or weird strings
+        console.log(`GOT raw [${pathStr}/sync]: ${text}`);
+        this.lastKnownText = text;
+      }
+
       if (this.rcv_callback) {
-        this.rcv_callback(text)
+        console.log("got callback: ", this.lastKnownText)
+        this.rcv_callback(this.lastKnownText);
       }
     }
+  }
+
+  private applyOT(text: string, ops: (string | number)[]): string {
+    let result = "";
+    let cursor = 0;
+    for (const op of ops) {
+      if (typeof op === "string") {
+        // Insert
+        result += op;
+      } else if (op > 0) {
+        // Retain
+        result += text.substring(cursor, cursor + op);
+        cursor += op;
+      } else {
+        // Delete
+        cursor += Math.abs(op);
+      }
+    }
+    return result;
   }
 
   private async handleOwnBroadcast(pathStr : string) {
@@ -176,7 +210,7 @@ export class MoqTextClient {
       if (!request) break;
 
       if (request.track.name === "update") {
-        console.log(`Received request for "update" track on my broadcast`);
+        console.log(`req for "update" track`);
         this.update_track = request.track;
       } else {
         request.track.close(new Error("not found"));

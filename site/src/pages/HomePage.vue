@@ -22,7 +22,7 @@ async function write() {
 
   <div>
     <label>URL: </label>
-    <input v-model="url" type="text" placeholder="https://localhost:4443" />
+    <input v-model="url" type="text" />
   </div>
 
   <div style="margin-top: 10px;">

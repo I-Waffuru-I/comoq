@@ -3,8 +3,11 @@ use clap::Parser;
 use moq_lite::{Broadcast, Origin, OriginConsumer, OriginProducer, Track};
 use moq_native::ServerConfig;
 use operational_transform::OperationSeq;
-use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::{sync::RwLock, task::JoinSet};
+use std::{path::PathBuf, sync::Arc};
+use tokio::{
+    sync::{RwLock, broadcast::channel},
+    task::JoinSet,
+};
 use tower_http::cors::{Any, CorsLayer};
 
 #[derive(clap::Parser)]
@@ -95,25 +98,34 @@ async fn run_file(
 
     publish_origin.publish_broadcast(file_name, bc.consumer);
 
-    // sends the full string once per few seconds
+    // sends the OT updates to clients
+    let (tx, mut rcv) = channel::<OperationSeq>(50);
     let doc_clone = doc_state.clone();
     let sync_track_clone = sync_track.clone();
-    let _name_clone = file_name.to_string();
     let send_thread = tokio::spawn(async move {
-        loop {
+        // First, send the initial state
+        {
             let doc = doc_clone.read().await;
-            // Get current text by applying the cumulative op to an empty string
-            if let Ok(text) = doc.apply("") {
-                let mut track = sync_track_clone.write().await;
-                // println!("sync bc [{_name_clone}] : [{text}]");
-                track.write_frame(bytes::Bytes::from(text));
+            let json_op = serde_json::to_string(&*doc).unwrap();
+            let mut track = sync_track_clone.write().await;
+            track.write_frame(bytes::Bytes::from(json_op));
+        }
+
+        loop {
+            match rcv.recv().await {
+                Ok(op) => {
+                    let json_op = serde_json::to_string(&op).unwrap();
+                    let mut track = sync_track_clone.write().await;
+                    track.write_frame(bytes::Bytes::from(json_op));
+                }
+                Err(_) => {}
             }
-            tokio::time::sleep(Duration::from_secs(3)).await;
         }
     });
 
     // handle connecting clients and merge their changes
     let doc_receive_clone = doc_state.clone();
+    let tx_clone = tx.clone();
     let name_clone = file_name.to_string();
     let receive_thread = tokio::spawn(async move {
         println!("START LISTEN FOR UPDATE BCs IN {name_clone}");
@@ -137,6 +149,7 @@ async fn run_file(
 
             // find update track of client to read changes from
             let doc_inner_clone = doc_receive_clone.clone();
+            let tx_inner = tx_clone.clone();
             let _handle_bc = tokio::spawn(async move {
                 println!("start thread for updates track");
                 let track_name = String::from("update");
@@ -148,19 +161,20 @@ async fn run_file(
                 while let Ok(Some(mut group)) = client_track.next_group().await {
                     while let Ok(Some(frame)) = group.read_frame().await {
                         if let Ok(incoming_op) = serde_json::from_slice::<OperationSeq>(&frame) {
-                            println!("Update op over bc [{}]: {:?}", announced.0, incoming_op);
                             let mut doc = doc_inner_clone.write().await;
+                            println!("Update op over bc [{}]: [{:?}]  [{:?}]", announced.0, doc, incoming_op);
 
                             // neem aan dat incoming_op.len() == doc.len()
                             match doc.compose(&incoming_op) {
                                 Ok(new_doc) => {
                                     *doc = new_doc;
+                                    let _ = tx_inner.send(incoming_op);
                                     if let Ok(text) = doc.apply("") {
                                         println!("New document state: [{}]", text);
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to merge OT op: {:?}", e);
+                                    eprintln!("Failed to merge OT op: {}", e);
                                 }
                             }
                         } else if let Ok(text) = String::from_utf8(frame.to_vec()) {
@@ -172,7 +186,8 @@ async fn run_file(
                             let mut doc = doc_inner_clone.write().await;
                             let mut new_op = OperationSeq::default();
                             new_op.insert(&text);
-                            *doc = new_op;
+                            *doc = new_op.clone();
+                            let _ = tx_inner.send(new_op);
                         }
                     }
                 }
@@ -243,7 +258,7 @@ mod tests {
         doc.insert("abc");
 
         let mut edit = OperationSeq::default();
-        edit.retain(5); 
+        edit.retain(5);
 
         let result = doc.compose(&edit);
         assert!(result.is_err());
