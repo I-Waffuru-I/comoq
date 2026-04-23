@@ -3,7 +3,7 @@ use clap::Parser;
 use moq_lite::{Broadcast, Origin, OriginConsumer, OriginProducer, Track};
 use moq_native::ServerConfig;
 use operational_transform::OperationSeq;
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
     sync::{RwLock, broadcast::channel},
     task::JoinSet,
@@ -83,49 +83,74 @@ async fn run_file(
     publish_origin: OriginProducer,
     mut consume_origin: OriginConsumer,
 ) {
+
+    let initial_text = format!("moq echo for {file_name}");
+
     let mut bc = Broadcast::produce();
     // main track to push
-    let main_t = bc.producer.create_track(moq_lite::Track {
-        name: "sync".to_string(),
-        priority: 0,
-    });
-    let initial_text = format!("moq echo for {file_name}");
     let mut initial_op = OperationSeq::default();
     initial_op.insert(&initial_text);
 
     let doc_state = Arc::new(RwLock::new(initial_op));
-    let sync_track = Arc::new(RwLock::new(main_t));
 
     publish_origin.publish_broadcast(file_name, bc.consumer);
 
     // sends the OT updates to clients
-    let (tx, mut rcv) = channel::<OperationSeq>(50);
-    let doc_clone = doc_state.clone();
-    let sync_track_clone = sync_track.clone();
-    let send_thread = tokio::spawn(async move {
+    let mut sync_track = bc.producer.create_track(moq_lite::Track {
+        name: "sync".to_string(),
+        priority: 0,
+    });
+    let (tx_changes, mut rcv_changes) = channel::<OperationSeq>(50);
+    let doc_clone_changes = doc_state.clone();
+    let  send_changes_thread = tokio::spawn(async move {
         // First, send the initial state
         {
-            let doc = doc_clone.read().await;
+            let doc = doc_clone_changes.read().await;
             let json_op = serde_json::to_string(&*doc).unwrap();
-            let mut track = sync_track_clone.write().await;
-            track.write_frame(bytes::Bytes::from(json_op));
+            println!("sending full state: [{}]", json_op);
+            sync_track.write_frame(bytes::Bytes::from(json_op));
         }
 
         loop {
-            match rcv.recv().await {
+            match rcv_changes.recv().await {
                 Ok(op) => {
                     let json_op = serde_json::to_string(&op).unwrap();
-                    let mut track = sync_track_clone.write().await;
-                    track.write_frame(bytes::Bytes::from(json_op));
+                    sync_track.write_frame(bytes::Bytes::from(json_op));
                 }
                 Err(_) => {}
             }
         }
     });
 
+    // keeps track of file state
+    let mut state_track = bc.producer.create_track(moq_lite::Track {
+        name: "state".to_string(),
+        priority: 0,
+    });
+    let (tx_state, mut rcv_state) = channel::<()>(50);
+    let doc_clone_state = doc_state.clone();
+    let send_state_thread = tokio::spawn(async move {
+        loop {
+            match rcv_state.recv().await {
+                Ok(_) => {
+                    let doc = doc_clone_state.read().await;
+                    let json_op = serde_json::to_string(&*doc).unwrap();
+                    println!("sending full state: [{}]", json_op);
+                    state_track.write_frame(bytes::Bytes::from(json_op));
+                }
+                Err(_) => {}
+            }
+        }
+    });
+    let manage_state_thread = tokio::spawn(async move {
+        loop {
+            let _ = tokio::time::sleep(Duration::from_secs(5)).await;
+            let _ = tx_state.send(());
+        }
+    });
+
     // handle connecting clients and merge their changes
     let doc_receive_clone = doc_state.clone();
-    let tx_clone = tx.clone();
     let name_clone = file_name.to_string();
     let receive_thread = tokio::spawn(async move {
         println!("START LISTEN FOR UPDATE BCs IN {name_clone}");
@@ -149,7 +174,7 @@ async fn run_file(
 
             // find update track of client to read changes from
             let doc_inner_clone = doc_receive_clone.clone();
-            let tx_inner = tx_clone.clone();
+            let tx_inner = tx_changes.clone();
             let _handle_bc = tokio::spawn(async move {
                 println!("start thread for updates track");
                 let track_name = String::from("update");
@@ -196,7 +221,7 @@ async fn run_file(
             // let _ = handle_bc.await;
         }
     });
-    let _ = tokio::join!(send_thread, receive_thread);
+    let _ = tokio::join!(send_changes_thread, send_state_thread, manage_state_thread, receive_thread);
 }
 
 async fn setup_cors_stuff(fingerprint: String, join_set: &mut JoinSet<()>) -> anyhow::Result<()> {
