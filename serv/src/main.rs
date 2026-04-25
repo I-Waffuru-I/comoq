@@ -83,39 +83,29 @@ async fn run_file(
     publish_origin: OriginProducer,
     mut consume_origin: OriginConsumer,
 ) {
+    let mut bc = Broadcast::produce();
+    publish_origin.publish_broadcast(file_name, bc.consumer);
 
     let initial_text = format!("moq echo for {file_name}");
-
-    let mut bc = Broadcast::produce();
-    // main track to push
     let mut initial_op = OperationSeq::default();
     initial_op.insert(&initial_text);
-
     let doc_state = Arc::new(RwLock::new(initial_op));
-
-    publish_origin.publish_broadcast(file_name, bc.consumer);
+    let doc_version = Arc::new(RwLock::new(0u64));
 
     // sends the OT updates to clients
     let mut sync_track = bc.producer.create_track(moq_lite::Track {
         name: "sync".to_string(),
         priority: 0,
     });
-    let (tx_changes, mut rcv_changes) = channel::<OperationSeq>(50);
-    let doc_clone_changes = doc_state.clone();
-    let  send_changes_thread = tokio::spawn(async move {
-        // First, send the initial state
-        {
-            let doc = doc_clone_changes.read().await;
-            let json_op = serde_json::to_string(&*doc).unwrap();
-            println!("sending full state: [{}]", json_op);
-            sync_track.write_frame(bytes::Bytes::from(json_op));
-        }
-
+    let (tx_changes, mut rcv_changes) = channel::<(String, u64, OperationSeq)>(50);
+    let send_changes_thread = tokio::spawn(async move {
         loop {
             match rcv_changes.recv().await {
-                Ok(op) => {
+                Ok((client, version, op)) => {
                     let json_op = serde_json::to_string(&op).unwrap();
-                    sync_track.write_frame(bytes::Bytes::from(json_op));
+                    let packet = format!("{};{};{}", client, version, json_op);
+                    // println!("packet: {packet}");
+                    sync_track.write_frame(bytes::Bytes::from(packet));
                 }
                 Err(_) => {}
             }
@@ -127,16 +117,30 @@ async fn run_file(
         name: "state".to_string(),
         priority: 0,
     });
-    let (tx_state, mut rcv_state) = channel::<()>(50);
+    let (tx_state, mut rcv_state) = channel::<bool>(50);
+    let tx_state_clone = tx_state.clone();
     let doc_clone_state = doc_state.clone();
+    let version_state = doc_version.clone();
     let send_state_thread = tokio::spawn(async move {
+        let mut doc_last_save = doc_clone_state
+            .read()
+            .await
+            .apply("")
+            .unwrap_or(String::new());
+        // println!("state save : [{}]", doc_last_save);
         loop {
             match rcv_state.recv().await {
-                Ok(_) => {
+                Ok(d) => {
                     let doc = doc_clone_state.read().await;
-                    let json_op = serde_json::to_string(&*doc).unwrap();
-                    println!("sending full state: [{}]", json_op);
-                    state_track.write_frame(bytes::Bytes::from(json_op));
+                    if let Ok(txt) = doc.apply("") {
+                        let version = *version_state.read().await;
+                        if txt != doc_last_save || d {
+                            // println!("state (v{}): [{}]", version, txt);
+                            let packet = format!("{};{}", version, txt);
+                            state_track.write_frame(bytes::Bytes::from(packet));
+                            doc_last_save = txt;
+                        }
+                    }
                 }
                 Err(_) => {}
             }
@@ -144,12 +148,13 @@ async fn run_file(
     });
     let manage_state_thread = tokio::spawn(async move {
         loop {
-            let _ = tokio::time::sleep(Duration::from_secs(5)).await;
-            let _ = tx_state.send(());
+            let _ = tokio::time::sleep(Duration::from_secs(1)).await;
+            let _ = tx_state_clone.send(false);
         }
     });
 
     // handle connecting clients and merge their changes
+    let tx_state_clone = tx_state.clone();
     let doc_receive_clone = doc_state.clone();
     let name_clone = file_name.to_string();
     let receive_thread = tokio::spawn(async move {
@@ -158,25 +163,28 @@ async fn run_file(
             println!("\nUPDATE BC ANNOUNCED [{}]\n", announced.0);
             // ignore bc that aren't directed at this file
             // maybe it messes with other threads?
-            if !announced
-                .0
-                .to_string()
-                .starts_with(&format!("{name_clone}/client/"))
-            {
+            if !announced.0.to_string().starts_with(&format!("{name_clone}/client/")) {
                 println!("ANNOUNCE SKIP [{}] by [{}]", announced.0, name_clone);
                 continue;
             }
-            if announced.1.is_none() {
+            let bc = if let Some(b) = announced.1 {
+                b
+            } else {
                 println!("CLOSED");
                 continue;
-            }
-            let bc = announced.1.unwrap();
+            };
+
+            // send update to state
+            let _ = tx_state_clone.send(true);
 
             // find update track of client to read changes from
             let doc_inner_clone = doc_receive_clone.clone();
+            let doc_version_clone = doc_version.clone();
             let tx_inner = tx_changes.clone();
             let _handle_bc = tokio::spawn(async move {
-                println!("start thread for updates track");
+                let client_id = announced.0.to_string().split("/").nth(2)
+                    .unwrap_or(&announced.0.to_string()).to_string();
+                println!("start thread for updates track [{}]", client_id);
                 let track_name = String::from("update");
                 let track = Track {
                     name: track_name.clone(),
@@ -185,34 +193,30 @@ async fn run_file(
                 let mut client_track = bc.subscribe_track(&track);
                 while let Ok(Some(mut group)) = client_track.next_group().await {
                     while let Ok(Some(frame)) = group.read_frame().await {
+                        let c = client_id.clone();
+                        let mut doc = doc_inner_clone.write().await;
+                        let mut version = doc_version_clone.write().await;
                         if let Ok(incoming_op) = serde_json::from_slice::<OperationSeq>(&frame) {
-                            let mut doc = doc_inner_clone.write().await;
-                            println!("Update op over bc [{}]: [{:?}]  [{:?}]", announced.0, doc, incoming_op);
-
                             // neem aan dat incoming_op.len() == doc.len()
                             match doc.compose(&incoming_op) {
                                 Ok(new_doc) => {
                                     *doc = new_doc;
-                                    let _ = tx_inner.send(incoming_op);
-                                    if let Ok(text) = doc.apply("") {
-                                        println!("New document state: [{}]", text);
-                                    }
+                                    *version += 1;
+                                    // println!("[{}] updated (v{}): [{}]", c, *version, doc.apply("").unwrap());
+                                    let _ = tx_inner.send((c, *version, incoming_op));
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to merge OT op: {}", e);
+                                    eprintln!("[{}] Failed to merge OT op: {}", c, e);
                                 }
                             }
                         } else if let Ok(text) = String::from_utf8(frame.to_vec()) {
                             // Fallback for simple text updates if they don't look like JSON array of ops
-                            println!(
-                                "Update text (fallback) over bc [{}]: [{}]",
-                                announced.0, text
-                            );
-                            let mut doc = doc_inner_clone.write().await;
+                            *version += 1;
+                            // println!("[{}] updated (v{}) (fallback) : [{}]", c, *version, text);
                             let mut new_op = OperationSeq::default();
                             new_op.insert(&text);
                             *doc = new_op.clone();
-                            let _ = tx_inner.send(new_op);
+                            let _ = tx_inner.send((c, *version, new_op));
                         }
                     }
                 }
@@ -221,7 +225,12 @@ async fn run_file(
             // let _ = handle_bc.await;
         }
     });
-    let _ = tokio::join!(send_changes_thread, send_state_thread, manage_state_thread, receive_thread);
+    let _ = tokio::join!(
+        send_changes_thread,
+        send_state_thread,
+        manage_state_thread,
+        receive_thread
+    );
 }
 
 async fn setup_cors_stuff(fingerprint: String, join_set: &mut JoinSet<()>) -> anyhow::Result<()> {

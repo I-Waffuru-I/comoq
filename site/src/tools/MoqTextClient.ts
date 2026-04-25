@@ -1,5 +1,36 @@
 import * as Moq from "@kixelated/moq"
 
+class SyncMessage {
+  constructor(public client: string, public version: number, public ops: unknown) {}
+  static parse(text: string): SyncMessage | null {
+    const parts = text.split(';');
+    if (parts.length < 3) return null;
+    const client = parts[0];
+    const vStr = parts[1];
+    if (client === undefined || vStr === undefined) return null;
+    const version = parseInt(vStr, 10);
+    if (isNaN(version)) return null;
+    try {
+      const ops = JSON.parse(parts.slice(2).join(';'));
+      return new SyncMessage(client, version, ops);
+    } catch {
+      return null;
+    }
+  }
+}
+
+class StateMessage {
+  constructor(public version: number, public text: string) {}
+  static parse(text: string): StateMessage | null {
+    const splitIdx = text.indexOf(';');
+    if (splitIdx === -1) return null;
+    const version = parseInt(text.substring(0, splitIdx), 10);
+    if (isNaN(version)) return null;
+    const body = text.substring(splitIdx + 1);
+    return new StateMessage(version, body);
+  }
+}
+
 export class MoqTextClient {
   private connection: Moq.Connection.Established | null = null;
   private clientName: string;
@@ -10,6 +41,7 @@ export class MoqTextClient {
   private handledPaths : Set<string> = new Set();
   private connecting : boolean = false;
   private lastKnownText : string = "";
+  private lastKnownVersion : number = -1;
 
   constructor(clientName: string = "client_" + Math.floor(Math.random() * 1000)) {
     this.clientName = clientName;
@@ -101,36 +133,6 @@ export class MoqTextClient {
     // start own bc
     this.handleOwnBroadcast(path_str)
 
-    // for (;;) {
-    //   const entry = await this.connection.announced().next();
-    //   if (!entry) break;
-    //
-    //   const path_str = entry.path.toString();
-    //
-    //   if (!entry.active) {
-    //     console.log("Broadcast unannounced:", path_str);
-    //     this.handledPaths.delete(path_str);
-    //     continue;
-    //   }
-    //
-    //   if (this.handledPaths.has(path_str)) {
-    //     continue;
-    //   }
-    //
-    //   if (path_str.includes("/client/")) {
-    //     continue;
-    //   }
-    //
-    //   // found file broadcast
-    //   console.log("HANDLE BC: ", path_str);
-    //   this.bc_name = path_str
-    //   this.handledPaths.add(path_str);
-    //
-    //   // handle incoming updates
-    //   this.handleSyncBc(entry.path);
-    //   // start own bc
-    //   this.handleOwnBroadcast(path_str)
-    // }
   }
 
   private async handleSyncBc(path: Moq.Path.Valid) {
@@ -138,33 +140,47 @@ export class MoqTextClient {
 
     const pathStr = path.toString();
     const bc = this.connection.consume(path);
-    const track = bc.subscribe("sync", 0);
+    const sync_track = bc.subscribe("sync", 0);
+    const state_track = bc.subscribe("state", 0);
     console.log(`Subscribed to track "update" on broadcast: [${pathStr}]`);
 
     // Read incoming messages
-    this.readTrack(track, pathStr);
+    this.readSyncTrack(sync_track, pathStr)
+    this.readStateTrack(state_track, pathStr)
   }
-  private async readTrack(track: Moq.Track, pathStr: string) {
+  private async readSyncTrack(track: Moq.Track, pathStr: string) {
     for (;;) {
+      if (!this.connection) {
+        break
+      }
       const text = await track.readString();
       if (text === undefined) {
-        console.log(`Track "update" closed for [${pathStr}]`);
+        console.log(`Track "sync" closed for [${pathStr}]`);
         break;
       }
 
-      try {
-        const ops = JSON.parse(text);
-        if (Array.isArray(ops)) {
-          console.log(`GOT OT [${pathStr}/sync]: ${text}`);
-          this.lastKnownText = this.applyOT(this.lastKnownText, ops);
-        } else {
-          console.log(`GOT full text [${pathStr}/sync]: ${text}`);
-          this.lastKnownText = text;
-        }
-      } catch {
-        // Fallback for non-JSON or weird strings
-        console.log(`GOT raw [${pathStr}/sync]: ${text}`);
-        this.lastKnownText = text;
+      const msg = SyncMessage.parse(text);
+      if (!msg) {
+        console.log(`Failed to parse sync msg: ${text}`);
+        continue;
+      }
+
+      if (msg.version <= this.lastKnownVersion) {
+        console.log(`Ignoring stale sync update: ${msg.version} <= ${this.lastKnownVersion}`);
+        continue;
+      }
+
+      this.lastKnownVersion = msg.version;
+      if (msg.client == this.clientName) {
+        continue
+      }
+
+      if (Array.isArray(msg.ops)) {
+        console.log(`GOT OT [${pathStr}/${track.name}] (v${msg.version}): ${msg.ops}`);
+        this.lastKnownText = this.applyOT(this.lastKnownText, msg.ops as (string | number)[]);
+      } else if (typeof msg.ops === "string") {
+        console.log(`GOT full text [${pathStr}/] (v${msg.version}): ${msg.ops}`);
+        this.lastKnownText = msg.ops;
       }
 
       if (this.rcv_callback) {
@@ -172,6 +188,43 @@ export class MoqTextClient {
         this.rcv_callback(this.lastKnownText);
       }
     }
+  }
+
+  private async readStateTrack(track: Moq.Track, pathStr: string) {
+    for (;;) {
+      if (!this.connection) {
+        break
+      }
+      const text = await track.readString();
+      if (text === undefined) {
+        console.log(`Track "state" closed for [${pathStr}]`);
+        break;
+      }
+
+      const msg = StateMessage.parse(text);
+      if (!msg) {
+        console.log(`Failed to parse state msg: ${text}`);
+        continue;
+      }
+
+      if (msg.version <= this.lastKnownVersion) {
+        console.log(`Ignoring stale state update: ${msg.version} <= ${this.lastKnownVersion}`);
+        continue;
+      }
+
+      console.log(`STATE RECALL (v${msg.version}): ${msg.text}`);
+      this.lastKnownText = msg.text
+      this.lastKnownVersion = msg.version
+
+      if (this.rcv_callback) {
+        this.rcv_callback(this.lastKnownText);
+      }
+    }
+  }
+  private async sleep(ms: number): Promise<void> {
+      return new Promise(
+          (resolve) => setTimeout(resolve, ms)
+      );
   }
 
   private applyOT(text: string, ops: (string | number)[]): string {
