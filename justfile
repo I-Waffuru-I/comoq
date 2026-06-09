@@ -29,5 +29,9 @@ dev-cert:
         -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 
 
+latency:
+   cd serv && cargo run --bin latency
 
+overload:
+   cd serv && cargo run --bin overload 
 

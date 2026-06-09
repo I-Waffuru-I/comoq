@@ -10,6 +10,8 @@ use tokio::{
 };
 use tower_http::cors::{Any, CorsLayer};
 
+mod logger;
+
 #[derive(clap::Parser)]
 struct ArgList {
     #[arg(short, long)]
