@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router';
 import { connectionManager } from '../tools/ConnectionManager';
 
 const router = useRouter();
-const url = ref('http://localhost:4443');
+const url = ref('https://192.168.1.62:4443');
 
 async function read() {
   await connectionManager.run(url.value);

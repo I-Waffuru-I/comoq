@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     println!("FINGERPRINTS");
     dbg!(&fingerprints);
     let mut joinset: JoinSet<()> = JoinSet::new();
-    let _ = setup_cors_stuff(fingerprints.get(0).unwrap().clone(), &mut joinset).await;
+    let _ = setup_cors_stuff(fingerprints.get(0).unwrap().clone(), &mut joinset, &arglist.url).await;
 
     println!("Server started, listening for tracks in broadcast 'echo'...");
 
@@ -235,7 +235,7 @@ async fn run_file(
     );
 }
 
-async fn setup_cors_stuff(fingerprint: String, join_set: &mut JoinSet<()>) -> anyhow::Result<()> {
+async fn setup_cors_stuff(fingerprint: String, join_set: &mut JoinSet<()>, bind_url: &str) -> anyhow::Result<()> {
     // simpele http server om ne get van sha fingerprints te voorzien
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -246,7 +246,7 @@ async fn setup_cors_stuff(fingerprint: String, join_set: &mut JoinSet<()>) -> an
         .route("/certificate.sha256", get(fingerprint))
         .layer(cors);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:4443").await?;
+    let listener = tokio::net::TcpListener::bind(bind_url).await?;
     join_set.spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
