@@ -47,7 +47,12 @@ async fn main() -> anyhow::Result<()> {
     println!("FINGERPRINTS");
     dbg!(&fingerprints);
     let mut joinset: JoinSet<()> = JoinSet::new();
-    let _ = setup_cors_stuff(fingerprints.get(0).unwrap().clone(), &mut joinset, &arglist.url).await;
+    let _ = setup_cors_stuff(
+        fingerprints.get(0).unwrap().clone(),
+        &mut joinset,
+        &arglist.url,
+    )
+    .await;
 
     println!("Server started, listening for tracks in broadcast 'echo'...");
 
@@ -165,7 +170,11 @@ async fn run_file(
             println!("\nUPDATE BC ANNOUNCED [{}]\n", announced.0);
             // ignore bc that aren't directed at this file
             // maybe it messes with other threads?
-            if !announced.0.to_string().starts_with(&format!("{name_clone}/client/")) {
+            if !announced
+                .0
+                .to_string()
+                .starts_with(&format!("{name_clone}/client/"))
+            {
                 println!("ANNOUNCE SKIP [{}] by [{}]", announced.0, name_clone);
                 continue;
             }
@@ -184,8 +193,13 @@ async fn run_file(
             let doc_version_clone = doc_version.clone();
             let tx_inner = tx_changes.clone();
             let _handle_bc = tokio::spawn(async move {
-                let client_id = announced.0.to_string().split("/").nth(2)
-                    .unwrap_or(&announced.0.to_string()).to_string();
+                let client_id = announced
+                    .0
+                    .to_string()
+                    .split("/")
+                    .nth(2)
+                    .unwrap_or(&announced.0.to_string())
+                    .to_string();
                 println!("start thread for updates track [{}]", client_id);
                 let track_name = String::from("update");
                 let track = Track {
@@ -199,7 +213,15 @@ async fn run_file(
                         let mut doc = doc_inner_clone.write().await;
                         let mut version = doc_version_clone.write().await;
                         if let Ok(incoming_op) = serde_json::from_slice::<OperationSeq>(&frame) {
-                            // neem aan dat incoming_op.len() == doc.len()
+                            let doc_len = doc.target_len();
+                            let op_base = incoming_op.base_len();
+                            if op_base != doc_len {
+                                eprintln!(
+                                    "[{}] Rejected OT op: base_len ({}) != doc len ({}), client will re-sync via state track",
+                                    c, op_base, doc_len
+                                );
+                                continue;
+                            }
                             match doc.compose(&incoming_op) {
                                 Ok(new_doc) => {
                                     *doc = new_doc;
@@ -235,7 +257,11 @@ async fn run_file(
     );
 }
 
-async fn setup_cors_stuff(fingerprint: String, join_set: &mut JoinSet<()>, bind_url: &str) -> anyhow::Result<()> {
+async fn setup_cors_stuff(
+    fingerprint: String,
+    join_set: &mut JoinSet<()>,
+    bind_url: &str,
+) -> anyhow::Result<()> {
     // simpele http server om ne get van sha fingerprints te voorzien
     let cors = CorsLayer::new()
         .allow_origin(Any)

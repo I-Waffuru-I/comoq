@@ -21,8 +21,9 @@ use url::Url;
 /// 3. **state**  – the authoritative full-text snapshot read from the `state`
 ///    track once all echoes have been received.
 
-const BURST_DURATION_SECS: u64 = 5;
-const BURST_INTERVAL_MS: u64 = 10; // ~100 ops/s
+const PHASE_DURATION_SECS: u64 = 5;
+/// (label, ops_per_second) for each burst phase
+const PHASES: &[(&str, u64)] = &[("30 ops/s", 30), ("60 ops/s", 60), ("100 ops/s", 100)];
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -80,8 +81,8 @@ async fn main() -> anyhow::Result<()> {
     let initial_text = Arc::new(Mutex::new(String::new()));
 
     // -- per-op timing log -----------------------------------------------------
-    // Maps op counter -> (sent_instant, Option<recv_instant>)
-    let timing_log: Arc<Mutex<HashMap<u64, (Instant, Option<Instant>)>>> =
+    // Maps op counter -> (phase_index, sent_instant, Option<recv_instant>)
+    let timing_log: Arc<Mutex<HashMap<u64, (usize, Instant, Option<Instant>)>>> =
         Arc::new(Mutex::new(HashMap::new()));
     // Record the absolute start so we can make times relative in the CSV
     let test_epoch = Instant::now();
@@ -136,13 +137,17 @@ async fn main() -> anyhow::Result<()> {
                             // Always keep state_doc up to date
                             *state_doc_inner.lock().await = content.to_string();
 
-                            // First time: seed synced_doc and initial_text
-                            let mut init = synced_init_inner.lock().await;
-                            if !*init {
-                                *init = true;
+                            // Re-seed synced_doc from state to prevent drift
+                            {
                                 let mut op = OperationSeq::default();
                                 op.insert(content);
                                 *synced_doc_inner.lock().await = op;
+                            }
+
+                            // First time: also seed initial_text
+                            let mut init = synced_init_inner.lock().await;
+                            if !*init {
+                                *init = true;
                                 *initial_text_inner.lock().await = content.to_string();
                                 println!(
                                     "Initial state ({} chars): \"{}\"",
@@ -205,7 +210,7 @@ async fn main() -> anyhow::Result<()> {
                             {
                                 let mut log = timing_inner.lock().await;
                                 if let Some(entry) = log.get_mut(&op_num) {
-                                    entry.1 = Some(recv_at);
+                                    entry.2 = Some(recv_at);
                                 }
                             }
 
@@ -253,58 +258,80 @@ async fn main() -> anyhow::Result<()> {
 
         println!("\n========================================");
         println!("  STRESS TEST START");
-        println!("  Duration:  {} s", BURST_DURATION_SECS);
-        println!("  Interval:  {} ms between ops", BURST_INTERVAL_MS);
+        println!("  Phases:    {}", PHASES.len());
+        for (i, (label, _)) in PHASES.iter().enumerate() {
+            println!(
+                "    Phase {}: {} for {}s",
+                i + 1,
+                label,
+                PHASE_DURATION_SECS
+            );
+        }
         println!("========================================\n");
 
-        let start = Instant::now();
         let mut counter: u64 = 0;
 
-        while start.elapsed() < Duration::from_secs(BURST_DURATION_SECS) {
-            counter += 1;
+        for (phase_idx, (label, ops_per_sec)) in PHASES.iter().enumerate() {
+            let interval_ms = 1000 / ops_per_sec;
+            println!(
+                "  --- Phase {} ({}) — interval {}ms ---",
+                phase_idx + 1,
+                label,
+                interval_ms
+            );
 
-            let payload = format!("[{counter}]");
-            let payload_len = payload.len() as u64;
+            let phase_start = Instant::now();
 
-            // Build OT op: retain(current_len) + insert(payload)
-            let current_len = doc_len.lock().await.unwrap();
-            let mut op = OperationSeq::default();
-            op.retain(current_len);
-            op.insert(&payload);
+            while phase_start.elapsed() < Duration::from_secs(PHASE_DURATION_SECS) {
+                counter += 1;
 
-            let json = serde_json::to_string(&op).unwrap();
+                let payload = format!("[{counter}]");
+                let payload_len = payload.len() as u64;
 
-            // Record send timestamp
-            {
-                let mut log = timing_log_pub.lock().await;
-                log.insert(counter, (Instant::now(), None));
+                // Build OT op: retain(current_len) + insert(payload)
+                let current_len = doc_len.lock().await.unwrap();
+                let mut op = OperationSeq::default();
+                op.retain(current_len);
+                op.insert(&payload);
+
+                let json = serde_json::to_string(&op).unwrap();
+
+                // Record send timestamp with phase index
+                {
+                    let mut log = timing_log_pub.lock().await;
+                    log.insert(counter, (phase_idx, Instant::now(), None));
+                }
+
+                update_track.write_frame(bytes::Bytes::from(json));
+
+                // Immediately append to local copy
+                local_doc_pub.lock().await.push_str(&payload);
+                *doc_len.lock().await = Some(current_len + payload_len);
+
+                if counter % 50 == 0 {
+                    println!(
+                        "  sent {counter} ops ({:.1}s into phase)",
+                        phase_start.elapsed().as_secs_f64()
+                    );
+                }
+
+                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
             }
 
-            update_track.write_frame(bytes::Bytes::from(json));
-
-            // Immediately append to local copy
-            local_doc_pub.lock().await.push_str(&payload);
-            *doc_len.lock().await = Some(current_len + payload_len);
-
-            if counter % 50 == 0 {
-                println!(
-                    "  sent {counter} ops ({:.1}s elapsed)",
-                    start.elapsed().as_secs_f64()
-                );
-            }
-
-            tokio::time::sleep(Duration::from_millis(BURST_INTERVAL_MS)).await;
+            let elapsed = phase_start.elapsed();
+            let phase_ops = counter; // cumulative, but we print per-phase below
+            println!(
+                "  Phase {} done: {:.2}s elapsed, {} total ops so far",
+                phase_idx + 1,
+                elapsed.as_secs_f64(),
+                phase_ops
+            );
         }
 
-        let elapsed = start.elapsed();
         *sent_count_pub.lock().await = counter;
         *burst_done_pub.lock().await = true;
 
-        println!(
-            "\n  Burst done: {counter} ops in {:.2}s ({:.0} ops/s)",
-            elapsed.as_secs_f64(),
-            counter as f64 / elapsed.as_secs_f64()
-        );
+        println!("\n  All phases done: {counter} total ops sent.");
         println!("  Waiting for all echoes…\n");
     });
 
@@ -312,7 +339,8 @@ async fn main() -> anyhow::Result<()> {
     let recv_count_wait = recv_count.clone();
     let sent_count_wait = sent_count.clone();
 
-    let timeout = tokio::time::sleep(Duration::from_secs(BURST_DURATION_SECS + 30));
+    let total_phase_secs = PHASE_DURATION_SECS * PHASES.len() as u64;
+    let timeout = tokio::time::sleep(Duration::from_secs(total_phase_secs + 30));
 
     tokio::select! {
         _ = subscribe_task => {},
@@ -431,11 +459,23 @@ async fn main() -> anyhow::Result<()> {
 
     // -- write log file --------------------------------------------------------
     let log = timing_log.lock().await;
-    let mut csv = String::from("op,sent_ms,recv_ms,rtt_ms\n");
+    let mut csv = String::new();
     let mut keys: Vec<u64> = log.keys().copied().collect();
     keys.sort();
+
+    // Group ops by phase, write a header for each section
+    let mut current_phase: Option<usize> = None;
     for op in keys {
-        if let Some((sent_at, recv_opt)) = log.get(&op) {
+        if let Some((phase, sent_at, recv_opt)) = log.get(&op) {
+            if current_phase != Some(*phase) {
+                current_phase = Some(*phase);
+                let label = PHASES.get(*phase).map(|(l, _)| *l).unwrap_or("unknown");
+                if *phase > 0 {
+                    csv.push('\n');
+                }
+                csv.push_str(&format!("# Phase {} — {}\n", phase + 1, label));
+                csv.push_str("op,sent_ms,recv_ms,rtt_ms\n");
+            }
             let sent_ms = sent_at.duration_since(test_epoch).as_secs_f64() * 1000.0;
             match recv_opt {
                 Some(recv_at) => {
