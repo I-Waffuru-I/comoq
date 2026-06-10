@@ -1,5 +1,8 @@
 use std::{
-    collections::HashMap, fmt::Display, sync::{Arc, RwLock}, time::{Duration, Instant}
+    collections::HashMap,
+    fmt::Display,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
 };
 
 use chrono::Local;
@@ -9,34 +12,31 @@ use operational_transform::OperationSeq;
 use tokio::sync::Mutex;
 use url::Url;
 
-
-struct Logger <T> {
-    pub snt : Vec<T>,
-    pub rcv : Vec<T>,
+struct Logger<T> {
+    pub snt: Vec<T>,
+    pub rcv: Vec<T>,
 }
-impl<T : Display+Clone> Logger<T>  {
-
+impl<T: Display + Clone> Logger<T> {
     pub fn new() -> Logger<T> {
-        Logger{
-            snt : vec!(),
-            rcv : vec!(),
-
+        Logger {
+            snt: vec![],
+            rcv: vec![],
         }
     }
-    pub fn save(&self, filename: &str){
+    pub fn save(&self, filename: &str) {
         let mut output = String::new();
-        let mut items : Vec<(T, T)> = vec!();
+        let mut items: Vec<(T, T)> = vec![];
 
         for i in 0..self.snt.len() {
             if let Some(v1) = self.snt.iter().nth(i)
-              && let Some(v2) = self.rcv.iter().nth(i) {
-                  items.insert(i, (v1.clone(), v2.to_owned()))
+                && let Some(v2) = self.rcv.iter().nth(i)
+            {
+                items.insert(i, (v1.clone(), v2.to_owned()))
             }
-
         }
 
-        for (f,s) in items.iter() {
-            output.push_str(&format!("{};{}\r\n", f,s));
+        for (f, s) in items.iter() {
+            output.push_str(&format!("{};{}\r\n", f, s));
         }
 
         _ = std::fs::write(filename, output);
@@ -47,6 +47,7 @@ impl<T : Display+Clone> Logger<T>  {
 async fn main() -> anyhow::Result<()> {
     moq_native::Log::new(tracing::Level::INFO).init();
 
+    // let url = Url::parse("https://192.168.1.62:4443")?;
     let url = Url::parse("https://127.0.0.1:4443")?;
 
     let mut config = ClientConfig::default();
@@ -55,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let bc_name = "file1";
     let client_id = "latency_probe";
     let own_bc_name = format!("{bc_name}/client/{client_id}");
-    
+
     let logger = Arc::new(RwLock::new(Logger::<chrono::DateTime<Local>>::new()));
 
     // -- origins ---------------------------------------------------------------
@@ -82,12 +83,16 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Connected. Waiting for server broadcast '{bc_name}'…");
 
+    // We need to track the current document length so our OT ops are valid.
+    // The server starts with `"moq echo for file1"` (18 chars).
+    let doc_len = Arc::new(Mutex::new(18u64)); // length of "moq echo for file1"
     let pending: Arc<Mutex<HashMap<u64, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let pending_recv = pending.clone();
     let own_bc_filter = own_bc_name.clone();
     let mut origin_consumer = read_origin.consumer;
     let sub_logger = logger.clone();
+    let doc_len_sub = doc_len.clone();
 
     let subscribe_task = tokio::spawn(async move {
         while let Some((path, broadcast)) = origin_consumer.announced().await {
@@ -110,6 +115,32 @@ async fn main() -> anyhow::Result<()> {
             let sub_sub_logger = sub_logger.clone();
             let pending_inner = pending_recv.clone();
             let client_id_owned = client_id.to_string();
+            let doc_len_state = doc_len_sub.clone();
+            let bc_state = broadcast.clone();
+            let path_str_state = path_str.clone();
+
+            // Subscribe to state track to track and update the document length
+            tokio::spawn(async move {
+                let mut state_consumer = bc_state.subscribe_track(&moq_lite::Track::new("state"));
+                println!("Subscribed to [{path_str_state}/state]");
+
+                while let Ok(Some(mut group)) = state_consumer.next_group().await {
+                    while let Ok(Some(frame)) = group.read_frame().await {
+                        let Ok(text) = String::from_utf8(frame.to_vec()) else {
+                            continue;
+                        };
+                        // Packet: "version;content"
+                        let Some((_ver, content)) = text.split_once(';') else {
+                            continue;
+                        };
+                        let new_len = content.len() as u64;
+                        let mut l = doc_len_state.lock().await;
+                        *l = new_len;
+                        println!("State updated: version={_ver}, len={new_len}");
+                    }
+                }
+            });
+
             tokio::spawn(async move {
                 let mut sync_consumer = broadcast.subscribe_track(&moq_lite::Track::new("sync"));
                 println!(
@@ -158,9 +189,6 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // -- periodically send OT changes -----------------------------------------
-    // We need to track the current document length so our OT ops are valid.
-    // The server starts with `"moq echo for file1"` (18 chars).
-    let doc_len = Arc::new(Mutex::new(18u64)); // length of "moq echo for file1"
     let pending_send = pending.clone();
     let pub_logger = logger.clone();
 
@@ -171,6 +199,9 @@ async fn main() -> anyhow::Result<()> {
         let mut counter: u64 = 0;
         loop {
             counter += 1;
+            if counter > 100 {
+                return Ok(());
+            }
 
             let probe_text = format!("p{counter}");
             let probe_len = probe_text.len() as u64;
@@ -202,7 +233,7 @@ async fn main() -> anyhow::Result<()> {
                 *l += probe_len;
             }
 
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
         #[allow(unreachable_code)]
@@ -217,11 +248,11 @@ async fn main() -> anyhow::Result<()> {
         },
     }
     match logger.read() {
-        Ok(lg)=>{
+        Ok(lg) => {
             println!("saving data");
             lg.save("latency_log.csv");
         }
-        Err(_)=>{}
+        Err(_) => {}
     }
 
     Ok(())

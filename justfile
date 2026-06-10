@@ -16,7 +16,7 @@ site:
    cd site && npm run dev
 
 server url="127.0.0.1:4443" cert="../dev/cert.pem" key="../dev/key.pem":
-    cd serv && cargo run --bin serv -- -u {{url}} -c {{cert}} -k {{key}}
+    cd serv && cargo run --bin server -- -u {{url}} -c {{cert}} -k {{key}}
 
 dev-cert ip="192.168.1.62":
     mkdir -p dev

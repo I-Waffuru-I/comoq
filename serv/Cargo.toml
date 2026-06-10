@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "serv"
+name = "server"
 path = "src/main.rs"
 
 [[bin]]
@@ -21,8 +21,8 @@ path = "src/bin/overload.rs"
 
 [dependencies]
 anyhow = "1.0.101"
-moq-lite = "0.12.0"
-moq-native = "0.12.0"
+moq-lite = "=0.12.0"
+moq-native = "=0.12.0"
 bytes = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
