@@ -15,7 +15,7 @@ relay *args:
 site:
    cd site && npm run dev
 
-server url="127.0.0.1:4443" cert="../dev/cert.pem" key="../dev/key.pem":
+server url="0.0.0.0:4443" cert="../dev/cert.pem" key="../dev/key.pem":
     cd serv && cargo run --bin serv -- -u {{url}} -c {{cert}} -k {{key}}
 
 dev-cert ip="192.168.1.62":
@@ -26,7 +26,7 @@ dev-cert ip="192.168.1.62":
         -out dev/cert.pem \
         -days 14 -nodes \
         -subj "/CN=localhost" \
-        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:{{ip}}"
+        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:0.0.0.0,IP:{{ip}}"
 
 
 latency:
