@@ -26,7 +26,7 @@ dev-cert ip="192.168.1.62":
         -out dev/cert.pem \
         -days 14 -nodes \
         -subj "/CN=localhost" \
-        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:{{ip}}"
+        -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:0.0.0.0,IP:{{ip}}"
 
 
 latency:
